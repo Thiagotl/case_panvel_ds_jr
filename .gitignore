@@ -28,3 +28,6 @@ dist/
 # Local secrets (se usar)
 .env
 .env.*
+
+# Windows Mark-of-the-Web files (Zone.Identifier)
+*:Zone.Identifier
