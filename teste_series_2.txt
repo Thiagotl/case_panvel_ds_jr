@@ -1,0 +1,267 @@
+h <- 6
+
+ts_tons_train <- window(
+  ts_tons,
+  end = as.numeric(time(ts_tons)[length(ts_tons) - h])
+)
+
+ts_tons_test <- window(
+  ts_tons,
+  start = as.numeric(time(ts_tons)[length(ts_tons) - h + 1])
+)
+
+
+library(forecast)
+library(dplyr)
+
+rolling_origin_sarima <- function(
+    ts_tons_train,
+    order,
+    seasonal,
+    h = 6,
+    initial = 36
+) {
+
+  n <- length(ts_tons_train)
+
+  resultados <- list()
+  k <- 1
+
+  # A origem avança 1 mês por vez
+  for (origem in initial:(n - h)) {
+
+    # ------------------------------
+    # 1. TREINO DAQUELA RODADA
+    # ------------------------------
+
+    treino <- window(
+      ts_tons_train,
+      end = time(ts_tons_train)[origem]
+    )
+
+    # Valores reais dos próximos 6 meses
+    real <- as.numeric(
+      ts_tons_train[(origem + 1):(origem + h)]
+    )
+
+    datas_previsao <- time(ts_tons_train)[
+      (origem + 1):(origem + h)
+    ]
+
+    # ------------------------------
+    # 2. BOX-COX
+    # calculado somente com o treino
+    # daquela rodada
+    # ------------------------------
+
+    lambda_fold <- BoxCox.lambda(treino)
+
+    # ------------------------------
+    # 3. AJUSTE SARIMA
+    # ------------------------------
+
+    fit <- tryCatch(
+
+      Arima(
+        treino,
+        order = order,
+        seasonal = list(
+          order = seasonal,
+          period = frequency(ts_tons_train)
+        ),
+        lambda = lambda_fold
+      ),
+
+      error = function(e) NULL
+    )
+
+    if (is.null(fit)) {
+      next
+    }
+
+    # ------------------------------
+    # 4. PREVISÃO h = 6
+    # ------------------------------
+
+    fc <- forecast(
+      fit,
+      h = h,
+      level = c(80, 95),
+      biasadj = TRUE
+    )
+
+    previsto <- as.numeric(fc$mean)
+
+    # ------------------------------
+    # 5. SALVAR RESULTADOS
+    # ------------------------------
+
+    resultados[[k]] <- data.frame(
+
+      origem = origem,
+
+      data_origem =
+        as.numeric(time(ts_tons_train)[origem]),
+
+      data_previsao =
+        as.numeric(datas_previsao),
+
+      horizonte = 1:h,
+
+      real = real,
+
+      previsto = previsto,
+
+      erro = real - previsto,
+
+      erro_abs = abs(real - previsto),
+
+      erro_quad = (real - previsto)^2,
+
+      APE = abs(
+        (real - previsto) / real
+      ) * 100,
+
+      lower80 = as.numeric(fc$lower[, 1]),
+      upper80 = as.numeric(fc$upper[, 1]),
+
+      lower95 = as.numeric(fc$lower[, 2]),
+      upper95 = as.numeric(fc$upper[, 2])
+    )
+
+    k <- k + 1
+  }
+
+  bind_rows(resultados)
+}
+
+
+cv_sarima <- rolling_origin_sarima(
+  ts_tons_train = ts_tons_train,
+  order = c(0, 2, 1),
+  seasonal = c(0, 0, 1),
+  h = 6,
+  initial = 36
+)
+
+
+metricas_gerais <- cv_sarima %>%
+  summarise(
+
+    RMSE = sqrt(
+      mean(erro_quad, na.rm = TRUE)
+    ),
+
+    MAE = mean(
+      erro_abs,
+      na.rm = TRUE
+    ),
+
+    MAPE = mean(
+      APE,
+      na.rm = TRUE
+    ),
+
+    ME = mean(
+      erro,
+      na.rm = TRUE
+    )
+  )
+
+metricas_gerais
+
+
+
+metricas_horizonte <- cv_sarima %>%
+  group_by(horizonte) %>%
+  summarise(
+
+    RMSE = sqrt(
+      mean(erro_quad, na.rm = TRUE)
+    ),
+
+    MAE = mean(
+      erro_abs,
+      na.rm = TRUE
+    ),
+
+    MAPE = mean(
+      APE,
+      na.rm = TRUE
+    ),
+
+    ME = mean(
+      erro,
+      na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  )
+
+metricas_horizonte
+
+
+avaliacao_intervalos <- cv_sarima %>%
+  summarise(
+
+    cobertura_80 =
+      mean(
+        real >= lower80 &
+        real <= upper80,
+        na.rm = TRUE
+      ) * 100,
+
+    cobertura_95 =
+      mean(
+        real >= lower95 &
+        real <= upper95,
+        na.rm = TRUE
+      ) * 100,
+
+    largura_media_80 =
+      mean(
+        upper80 - lower80,
+        na.rm = TRUE
+      ),
+
+    largura_media_95 =
+      mean(
+        upper95 - lower95,
+        na.rm = TRUE
+      )
+  )
+
+avaliacao_intervalos
+
+
+
+intervalos_horizonte <- cv_sarima %>%
+  group_by(horizonte) %>%
+  summarise(
+
+    cobertura_80 =
+      mean(
+        real >= lower80 &
+        real <= upper80
+      ) * 100,
+
+    cobertura_95 =
+      mean(
+        real >= lower95 &
+        real <= upper95
+      ) * 100,
+
+    largura_80 =
+      mean(
+        upper80 - lower80
+      ),
+
+    largura_95 =
+      mean(
+        upper95 - lower95
+      ),
+
+    .groups = "drop"
+  )
+
+intervalos_horizonte
