@@ -1,0 +1,400 @@
+library(forecast)
+library(dplyr)
+
+grade_modelos <- expand.grid(
+  p = 0:3,
+  d = 0:2,
+  q = 0:3,
+  P = 0:2,
+  D = 0:1,
+  Q = 0:2
+)
+
+nrow(grade_modelos)
+
+
+avaliar_sarima <- function(
+    y,
+    p, d, q,
+    P, D, Q,
+    tipo = c("rolling_origin", "janela_rolante"),
+    h = 6,
+    initial = 36,
+    janela = 36
+) {
+
+  tipo <- match.arg(tipo)
+
+  n <- length(y)
+
+  resultados <- list()
+  k <- 1
+
+  # Cada origem precisa deixar h meses futuros disponíveis
+  origens <- initial:(n - h)
+
+  for (origem in origens) {
+
+    # -----------------------------
+    # DEFINE A JANELA DE TREINO
+    # -----------------------------
+
+    if (tipo == "rolling_origin") {
+
+      # janela expansiva
+      inicio <- 1
+
+    } else {
+
+      # janela fixa
+      inicio <- origem - janela + 1
+
+      if (inicio < 1) next
+    }
+
+    treino <- window(
+      y,
+      start = time(y)[inicio],
+      end   = time(y)[origem]
+    )
+
+    # -----------------------------
+    # VALORES REAIS FUTUROS
+    # -----------------------------
+
+    real <- as.numeric(
+      y[(origem + 1):(origem + h)]
+    )
+
+    # -----------------------------
+    # BOX-COX
+    # Calculado somente naquele treino
+    # -----------------------------
+
+    lambda_fold <- tryCatch(
+      BoxCox.lambda(treino),
+      error = function(e) NULL
+    )
+
+    if (is.null(lambda_fold))
+      next
+
+    # -----------------------------
+    # AJUSTA O SARIMA
+    # -----------------------------
+
+    fit <- tryCatch(
+
+      Arima(
+        treino,
+
+        order = c(p, d, q),
+
+        seasonal = list(
+          order = c(P, D, Q),
+          period = frequency(y)
+        ),
+
+        lambda = lambda_fold
+      ),
+
+      error = function(e) NULL
+    )
+
+    if (is.null(fit))
+      next
+
+    # -----------------------------
+    # PREVISÃO
+    # -----------------------------
+
+    fc <- tryCatch(
+
+      forecast(
+        fit,
+        h = h,
+        level = c(80, 95),
+        biasadj = TRUE
+      ),
+
+      error = function(e) NULL
+    )
+
+    if (is.null(fc))
+      next
+
+    previsto <- as.numeric(fc$mean)
+
+    # -----------------------------
+    # GUARDA RESULTADOS
+    # -----------------------------
+
+    resultados[[k]] <- data.frame(
+
+      origem = origem,
+
+      horizonte = 1:h,
+
+      real = real,
+
+      previsto = previsto,
+
+      erro = real - previsto,
+
+      erro_abs = abs(real - previsto),
+
+      erro_quad = (real - previsto)^2,
+
+      APE =
+        abs((real - previsto) / real) * 100,
+
+      lower80 = as.numeric(fc$lower[, 1]),
+      upper80 = as.numeric(fc$upper[, 1]),
+
+      lower95 = as.numeric(fc$lower[, 2]),
+      upper95 = as.numeric(fc$upper[, 2])
+    )
+
+    k <- k + 1
+  }
+
+  if (length(resultados) == 0)
+    return(NULL)
+
+  bind_rows(resultados)
+}
+
+
+testar_grade_sarima <- function(
+    y,
+    grade_modelos,
+    tipo,
+    h = 6,
+    initial = 36,
+    janela = 36
+) {
+
+  resultados_modelos <- list()
+
+  detalhes_modelos <- list()
+
+  k <- 1
+
+  for (i in seq_len(nrow(grade_modelos))) {
+
+    modelo <- grade_modelos[i, ]
+
+    cat(
+      "\r",
+      tipo,
+      "- Modelo",
+      i,
+      "de",
+      nrow(grade_modelos),
+      ":",
+      paste0(
+        "(",
+        modelo$p, ",",
+        modelo$d, ",",
+        modelo$q,
+        ")(",
+        modelo$P, ",",
+        modelo$D, ",",
+        modelo$Q,
+        ")[12]"
+      )
+    )
+
+    cv <- tryCatch(
+
+      avaliar_sarima(
+
+        y = y,
+
+        p = modelo$p,
+        d = modelo$d,
+        q = modelo$q,
+
+        P = modelo$P,
+        D = modelo$D,
+        Q = modelo$Q,
+
+        tipo = tipo,
+
+        h = h,
+
+        initial = initial,
+
+        janela = janela
+      ),
+
+      error = function(e) NULL
+    )
+
+    if (is.null(cv) || nrow(cv) == 0)
+      next
+
+    # -------------------------
+    # MÉTRICAS GERAIS
+    # -------------------------
+
+    RMSE <- sqrt(
+      mean(cv$erro^2, na.rm = TRUE)
+    )
+
+    MAE <- mean(
+      abs(cv$erro),
+      na.rm = TRUE
+    )
+
+    MAPE <- mean(
+      cv$APE,
+      na.rm = TRUE
+    )
+
+    ME <- mean(
+      cv$erro,
+      na.rm = TRUE
+    )
+
+    # -------------------------
+    # SOMENTE H = 6
+    # -------------------------
+
+    cv_h6 <- cv %>%
+      filter(horizonte == h)
+
+    RMSE_h6 <- sqrt(
+      mean(cv_h6$erro^2, na.rm = TRUE)
+    )
+
+    MAPE_h6 <- mean(
+      cv_h6$APE,
+      na.rm = TRUE
+    )
+
+    # -------------------------
+    # INTERVALOS
+    # -------------------------
+
+    cobertura_80 <- mean(
+      cv$real >= cv$lower80 &
+        cv$real <= cv$upper80,
+      na.rm = TRUE
+    ) * 100
+
+    cobertura_95 <- mean(
+      cv$real >= cv$lower95 &
+        cv$real <= cv$upper95,
+      na.rm = TRUE
+    ) * 100
+
+    largura_80 <- mean(
+      cv$upper80 - cv$lower80,
+      na.rm = TRUE
+    )
+
+    largura_95 <- mean(
+      cv$upper95 - cv$lower95,
+      na.rm = TRUE
+    )
+
+    # -------------------------
+    # GUARDA RESULTADO
+    # -------------------------
+
+    resultados_modelos[[k]] <- data.frame(
+
+      p = modelo$p,
+      d = modelo$d,
+      q = modelo$q,
+
+      P = modelo$P,
+      D = modelo$D,
+      Q = modelo$Q,
+
+      modelo = paste0(
+        "(",
+        modelo$p, ",",
+        modelo$d, ",",
+        modelo$q,
+        ")(",
+        modelo$P, ",",
+        modelo$D, ",",
+        modelo$Q,
+        ")[12]"
+      ),
+
+      RMSE = RMSE,
+      MAE = MAE,
+      MAPE = MAPE,
+      ME = ME,
+
+      RMSE_h6 = RMSE_h6,
+      MAPE_h6 = MAPE_h6,
+
+      cobertura_80 = cobertura_80,
+      cobertura_95 = cobertura_95,
+
+      largura_80 = largura_80,
+      largura_95 = largura_95
+    )
+
+    detalhes_modelos[[k]] <- cv
+
+    names(detalhes_modelos)[k] <-
+      resultados_modelos[[k]]$modelo
+
+    k <- k + 1
+  }
+
+  cat("\n")
+
+  ranking <- bind_rows(resultados_modelos) %>%
+    arrange(RMSE)
+
+  list(
+    ranking = ranking,
+    detalhes = detalhes_modelos
+  )
+}
+
+
+
+resultado_origin <- testar_grade_sarima(
+
+  y = ts_tons_train,
+
+  grade_modelos = grade_modelos,
+
+  tipo = "rolling_origin",
+
+  h = 6,
+
+  initial = 36
+)
+
+
+janela = 36
+
+
+resultado_janela <- testar_grade_sarima(
+
+  y = ts_tons_train,
+
+  grade_modelos = grade_modelos,
+
+  tipo = "janela_rolante",
+
+  h = 6,
+
+  initial = 36,
+
+  janela = 36
+)
+
+
+head(
+  resultado_janela$ranking,
+  20
+)
