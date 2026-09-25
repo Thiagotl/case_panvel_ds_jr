@@ -1,0 +1,105 @@
+library(forecast)
+library(dplyr)
+
+rolling_cv <- function(
+    y,
+    order,
+    seasonal,
+    h = 6,
+    initial = 36
+) {
+
+  n <- length(y)
+  resultados <- list()
+  k <- 1
+
+  for (origem in initial:(n - h)) {
+
+    # Janela expansiva:
+    # em cada rodada acrescentamos 1 nova observação
+    treino <- window(
+      y,
+      end = time(y)[origem]
+    )
+
+    lambda <- BoxCox.lambda(treino)
+
+    fit <- tryCatch(
+      Arima(
+        treino,
+        order = order,
+        seasonal = list(
+          order = seasonal,
+          period = frequency(y)
+        ),
+        lambda = lambda
+      ),
+      error = function(e) NULL
+    )
+
+    if (is.null(fit))
+      next
+
+    fc <- forecast(
+      fit,
+      h = h,
+      biasadj = TRUE
+    )
+
+    real <- as.numeric(
+      y[(origem + 1):(origem + h)]
+    )
+
+    previsto <- as.numeric(fc$mean)
+
+    resultados[[k]] <- data.frame(
+      origem = origem,
+      horizonte = 1:h,
+      real = real,
+      previsto = previsto,
+      erro = real - previsto
+    )
+
+    k <- k + 1
+  }
+
+  bind_rows(resultados)
+}
+
+
+cv_modelo <- rolling_cv(
+  y = ts_tons_train,
+  order = c(0, 2, 1),
+  seasonal = c(0, 0, 1),
+  h = 6,
+  initial = 36
+)
+
+metricas_h <- cv_modelo %>%
+  group_by(horizonte) %>%
+  summarise(
+    RMSE = sqrt(mean(erro^2, na.rm = TRUE)),
+    MAE = mean(abs(erro), na.rm = TRUE),
+    MAPE = mean(
+      abs(erro / real),
+      na.rm = TRUE
+    ) * 100,
+    ME = mean(erro, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+metricas_h
+
+
+
+metricas_gerais <- cv_modelo %>%
+  summarise(
+    RMSE = sqrt(mean(erro^2, na.rm = TRUE)),
+    MAE = mean(abs(erro), na.rm = TRUE),
+    MAPE = mean(
+      abs(erro / real),
+      na.rm = TRUE
+    ) * 100
+  )
+
+metricas_gerais
